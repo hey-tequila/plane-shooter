@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛩️ 打飞机小游戏</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a1a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', sans-serif;
+  }
+  .game-wrapper {
+    position: relative;
+    background: #111;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 0 40px rgba(0,150,255,0.3);
+  }
+  canvas {
+    display: block;
+    border: 2px solid #33f;
+    border-radius: 6px;
+    cursor: none;
+  }
+  .hud {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: #0ff;
+    padding: 10px 6px 6px 6px;
+    font-size: 18px;
+    font-weight: bold;
+  }
+  .hud span { color: #ff0; }
+  .hud button {
+    background: #33f;
+    border: none;
+    color: white;
+    padding: 6px 18px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  .hud button:hover { background: #55f; }
+  .controls-note {
+    color: #666;
+    font-size: 13px;
+    text-align: center;
+    padding-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="game-wrapper">
+  <div class="hud">
+    <div>🎯 得分: <span id="score">0</span></div>
+    <div>❤️ 生命: <span id="lives">3</span></div>
+    <button id="restartBtn">重新开始</button>
+  </div>
+  <canvas id="gameCanvas" width="600" height="500"></canvas>
+  <div class="controls-note">🖱️ 移动鼠标 &nbsp;|&nbsp; 左键 / 空格开火 &nbsp;|&nbsp; R 键重启</div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreSpan = document.getElementById('score');
+const livesSpan = document.getElementById('lives');
+
+// ====================== 游戏状态 ======================
+const W = 600, H = 500;
+let gameRunning = true;
+let score = 0;
+let lives = 3;
+let frame = 0;
+let enemySpawnTimer = 0;
+
+// ====================== 玩家 ======================
+const player = {
+  x: W / 2, y: H - 60,
+  r: 14,          // 碰撞半径
+  speed: 5,
+  shooting: false,
+  shootCooldown: 0,
+  invincible: 0,  // 无敌时间(帧数)
+};
+
+// 数组
+let bullets = [];
+let enemies = [];
+let particles = [];
+
+// 鼠标位置
+let mouseX = player.x;
+let mouseY = player.y;
+
+// 按键状态
+const keys = {};
+
+// ====================== 工具函数 ======================
+function rand(min, max) { return Math.random() * (max - min) + min; }
+
+function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// ====================== 粒子 ======================
+function spawnParticles(x, y, color, count = 12) {
+  for (let i = 0; i < count; i++) {
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(2, 5);
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: randInt(20, 40),
+      maxLife: 40,
+      r: rand(2, 4),
+      color,
+    });
+  }
+}
+
+function spawnScoreText(x, y, text, color = '#ff0') {
+  particles.push({
+    x, y, vx: 0, vy: -2,
+    life: 30, maxLife: 30,
+    r: 0, color,
+    text,
+  });
+}
+
+// ====================== 子弹 ======================
+function shootBullet() {
+  bullets.push({
+    x: player.x,
+    y: player.y - player.r,
+    w: 4,
+    h: 14,
+    speed: 7,
+  });
+  // 双发
+  bullets.push({
+    x: player.x,
+    y: player.y - player.r,
+    w: 4,
+    h: 14,
+    speed: 7,
+  });
+}
+
+// ====================== 敌人 ======================
+function spawnEnemy() {
+  const type = Math.random() < 0.25 ? 'tough' : 'normal';
+  const r = type === 'tough' ? 16 : 12;
+  const hp = type === 'tough' ? 3 : 1;
+  const speed = type === 'tough' ? 1.2 : rand(1.5, 3);
+  enemies.push({
+    x: rand(30, W - 30),
+    y: -20,
+    r,
+    hp,
+    maxHp: hp,
+    speed,
+    type,
+    wobble: rand(0, Math.PI * 2),
+    wobbleSpeed: rand(0.02, 0.05),
+    wobbleAmp: rand(30, 60),
+  });
+}
+
+// ====================== 碰撞 ======================
+function bulletEnemyCollision(bullet, enemy) {
+  const cx = bullet.x + bullet.w / 2;
+  const cy = bullet.y + bullet.h / 2;
+  const halfW = bullet.w / 2 + enemy.r;
+  const halfH = bullet.h / 2 + enemy.r;
+  // AABB vs circle 近似
+  return Math.abs(cx - enemy.x) < halfW && Math.abs(cy - enemy.y) < halfH;
+}
+
+// ====================== 更新 ======================
+function update() {
+  if (!gameRunning) return;
+  frame++;
+
+  // --- 玩家移动 ---
+  let dx = 0, dy = 0;
+  if (keys['ArrowLeft'] || keys['a']) dx = -1;
+  if (keys['ArrowRight'] || keys['d']) dx = 1;
+  if (keys['ArrowUp'] || keys['w']) dy = -1;
+  if (keys['ArrowDown'] || keys['s']) dy = 1;
+
+  // 鼠标在canvas范围内也控制
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  // 鼠标移动已经更新了 mouseX/mouseY
+  // 让玩家平滑跟随鼠标（如果不按键）
+  if (dx === 0 && dy === 0) {
+    const diffX = mouseX - player.x;
+    const diffY = mouseY - player.y;
+    const d = Math.hypot(diffX, diffY);
+    if (d > 5) {
+      const step = Math.min(player.speed * 0.15, d);
+      player.x += (diffX / d) * step;
+      player.y += (diffY / d) * step;
+    }
+  } else {
+    const len = Math.hypot(dx, dy);
+    player.x += (dx / len) * player.speed;
+    player.y += (dy / len) * player.speed;
+  }
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+  player.y = Math.max(player.r, Math.min(H - player.r, player.y));
+
+  // --- 射击 ---
+  if (player.shootCooldown > 0) player.shootCooldown--;
+  if (player.shooting && player.shootCooldown <= 0) {
+    shootBullet();
+    player.shootCooldown = 6;
+  }
+  if (player.invincible > 0) player.invincible--;
+
+  // --- 更新子弹 ---
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    bullets[i].y -= bullets[i].speed;
+    if (bullets[i].y + bullets[i].h < 0) {
+      bullets.splice(i, 1);
+    }
+  }
+
+  // --- 生成敌人 ---
+  enemySpawnTimer--;
+  if (enemySpawnTimer <= 0) {
+    spawnEnemy();
+    enemySpawnTimer = Math.max(15, 50 - Math.floor(frame / 300) * 3);
+  }
+
+  // --- 更新敌人 ---
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.y += e.speed;
+    e.wobble += e.wobbleSpeed;
+    e.x += Math.sin(e.wobble) * (e.wobbleAmp * 0.01);
+    e.x = Math.max(e.r, Math.min(W - e.r, e.x));
+
+    // 出界
+    if (e.y - e.r > H + 30) {
+      enemies.splice(i, 1);
+      continue;
+    }
+
+    // 碰撞玩家
+    if (player.invincible <= 0 && dist(e, player) < e.r + player.r) {
+      spawnParticles(player.x, player.y, '#0ff', 20);
+      lives--;
+      livesSpan.textContent = lives;
+      if (lives <= 0) {
+        gameRunning = false;
+        spawnParticles(player.x, player.y, '#f00', 30);
+        spawnScoreText(W / 2, H / 2 - 20, '💥 GAME OVER', '#f44');
+        return;
+      }
+      player.invincible = 60; // 1秒无敌
+      enemies.splice(i, 1);
+      continue;
+    }
+
+    // 子弹碰撞
+    let hit = false;
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      if (bulletEnemyCollision(bullets[j], e)) {
+        e.hp--;
+        bullets.splice(j, 1);
+        if (e.hp <= 0) {
+          spawnParticles(e.x, e.y, e.type === 'tough' ? '#f80' : '#f44', 15);
+          const pts = e.type === 'tough' ? 30 : 10;
+          score += pts;
+          scoreSpan.textContent = score;
+          spawnScoreText(e.x, e.y - 10, `+${pts}`, '#0f0');
+          hit = true;
+          enemies.splice(i, 1);
+        }
+        break;
+      }
+    }
+    if (hit) continue;
+  }
+
+  // --- 更新粒子 ---
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx || 0;
+    p.y += p.vy || 0;
+    p.life--;
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+}
+
+// ====================== 绘制 ======================
+function drawPlayer() {
+  const { x, y, r } = player;
+  // 闪烁无敌
+  if (player.invincible > 0 && Math.floor(player.invincible / 4) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // 尾焰
+  const grad = ctx.createLinearGradient(0, r + 5, 0, r + 18);
+  grad.addColorStop(0, 'rgba(100,200,255,0.8)');
+  grad.addColorStop(1, 'rgba(100,200,255,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(-8, r + 2);
+  ctx.lineTo(8, r + 2);
+  ctx.lineTo(0, r + 20);
+  ctx.closePath();
+  ctx.fill();
+
+  // 机身
+  ctx.fillStyle = '#0af';
+  ctx.beginPath();
+  ctx.moveTo(0, -r - 4);
+  ctx.lineTo(-r, r);
+  ctx.lineTo(-r * 0.6, r - 4);
+  ctx.lineTo(0, r);
+  ctx.lineTo(r * 0.6, r - 4);
+  ctx.lineTo(r, r);
+  ctx.closePath();
+  ctx.fill();
+
+  // 座舱
+  ctx.fillStyle = '#0ff';
+  ctx.beginPath();
+  ctx.ellipse(0, -2, 4, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 机翼
+  ctx.fillStyle = '#08c';
+  ctx.beginPath();
+  ctx.moveTo(-r - 6, 2);
+  ctx.lineTo(-r * 0.5, 6);
+  ctx.lineTo(-r * 0.5, -2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(r + 6, 2);
+  ctx.lineTo(r * 0.5, 6);
+  ctx.lineTo(r * 0.5, -2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawBullets() {
+  ctx.fillStyle = '#ff0';
+  ctx.shadowColor = '#ff0';
+  ctx.shadowBlur = 6;
+  for (const b of bullets) {
+    ctx.fillRect(b.x - 1, b.y, 3, b.h);
+  }
+  ctx.shadowBlur = 0;
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+
+    if (e.type === 'tough') {
+      // 大型敌机
+      ctx.fillStyle = '#c40';
+      ctx.beginPath();
+      ctx.moveTo(0, -e.r - 4);
+      ctx.lineTo(-e.r - 4, e.r);
+      ctx.lineTo(0, e.r - 6);
+      ctx.lineTo(e.r + 4, e.r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#f80';
+      ctx.beginPath();
+      ctx.arc(0, 0, e.r * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      // 血条
+      if (e.hp < e.maxHp) {
+        ctx.fillStyle = '#400';
+        ctx.fillRect(-e.r, -e.r - 8, e.r * 2, 4);
+        ctx.fillStyle = '#f44';
+        ctx.fillRect(-e.r, -e.r - 8, (e.r * 2) * (e.hp / e.maxHp), 4);
+      }
+    } else {
+      // 普通敌机
+      ctx.fillStyle = '#f44';
+      ctx.shadowColor = '#f44';
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.moveTo(0, -e.r - 2);
+      ctx.lineTo(-e.r, e.r);
+      ctx.lineTo(0, e.r - 4);
+      ctx.lineTo(e.r, e.r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fa0';
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(0, 0, e.r * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    if (p.text) {
+      ctx.fillStyle = p.color;
+      ctx.font = 'bold 18px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.text, p.x, p.y);
+    } else if (p.r > 0) {
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * alpha, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawStars() {
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < 50; i++) {
+    // 用固定伪随机位置
+    const sx = (i * 137.5 + 12) % W;
+    const sy = ((i * 97.3 + frame * 0.05) % H);
+    const sr = (i % 3) + 1;
+    ctx.globalAlpha = 0.4 + (i % 3) * 0.2;
+    ctx.fillRect(sx, sy, sr, sr);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOver() {
+  if (gameRunning) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#f44';
+  ctx.font = 'bold 48px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', W / 2, H / 2);
+  ctx.fillStyle = '#ff0';
+  ctx.font = '24px sans-serif';
+  ctx.fillText(`最终得分: ${score}`, W / 2, H / 2 + 50);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('按 R 或点击「重新开始」', W / 2, H / 2 + 100);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawStars();
+  drawEnemies();
+  drawBullets();
+  drawPlayer();
+  drawParticles();
+  drawGameOver();
+}
+
+// ====================== 循环 ======================
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ====================== 重置 ======================
+function resetGame() {
+  gameRunning = true;
+  score = 0;
+  lives = 3;
+  frame = 0;
+  enemySpawnTimer = 30;
+  bullets = [];
+  enemies = [];
+  particles = [];
+  player.x = W / 2;
+  player.y = H - 60;
+  player.invincible = 0;
+  player.shootCooldown = 0;
+  scoreSpan.textContent = '0';
+  livesSpan.textContent = '3';
+}
+
+// ====================== 事件绑定 ======================
+
+// 鼠标移动
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  mouseX = (e.clientX - rect.left) * scaleX;
+  mouseY = (e.clientY - rect.top) * scaleY;
+  mouseX = Math.max(0, Math.min(W, mouseX));
+  mouseY = Math.max(0, Math.min(H, mouseY));
+});
+
+// 鼠标按下射击
+canvas.addEventListener('mousedown', () => { player.shooting = true; });
+canvas.addEventListener('mouseup', () => { player.shooting = false; });
+canvas.addEventListener('mouseleave', () => { player.shooting = false; });
+
+// 键盘
+document.addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  if ((e.key === ' ' || e.key === 'Space') && gameRunning) {
+    e.preventDefault();
+    player.shooting = true;
+  }
+  if (e.key === 'r' || e.key === 'R') resetGame();
+});
+
+document.addEventListener('keyup', (e) => {
+  keys[e.key] = false;
+  if (e.key === ' ' || e.key === 'Space') player.shooting = false;
+});
+
+// 重启按钮
+document.getElementById('restartBtn').addEventListener('click', resetGame);
+
+// ====================== 启动 ======================
+enemySpawnTimer = 30;
+gameLoop();
+</script>
+</body>
+</html>
